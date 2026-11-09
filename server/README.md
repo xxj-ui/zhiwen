@@ -18,10 +18,9 @@ server/
 │   loaders.py      六种格式解析
 │   splitter.py     句子聚合切分（chunk_index 文档级连续）
 │   embedder.py     512 维向量化
-│   keyword_search.py  分词 + BM25 打分（只吃行数据）
+│   keyword_search.py  分词与 tsquery 构造（打分交给 PG）
 │   rrf.py          RRF 融合公式（纯函数）
 │   llm.py          DeepSeek 接入（提示词 + 流式）
-│   bm25_index.py   BM25 索引生命周期（M2）
 │
 ├── db/           数据访问：所有 SQL 只在这里
 │   pool.py         连接池（min=1 / max=4 / timeout=5 s）

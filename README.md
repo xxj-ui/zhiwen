@@ -9,7 +9,7 @@
 | 能力 | 说明 |
 | --- | --- |
 | 上传解析 | PDF / Word / Markdown / TXT / Excel / CSV，扫描件自动 OCR |
-| 混合检索 | 向量召回 + BM25 关键词，RRF 按名次融合 |
+| 混合检索 | 向量召回 + PostgreSQL 全文关键词，RRF 按名次融合 |
 | 带引用回答 | 流式输出，每条结论标注来源片段；无依据时明确拒答 |
 | 多轮追问 | 保留最近 5 轮上下文 |
 | 文档管理 | 列表、删除、片段只读预览 |
@@ -20,7 +20,7 @@
 单用户单机场景，8,935 块规模下 HNSW 查询 4.04 ms。独立向量库（Milvus / Qdrant）要多一套服务和一份运维成本，换不回这点时间；真到单机撑不住那天再换也不迟。
 
 **混合检索用 RRF，不给分数调权重**
-dense 与 BM25 的分数量纲不可比，线性加权要反复调参。RRF 只用名次融合，两路各取 top-20，零调参，且单路召回失效时另一路仍能兜住。
+dense 与关键词的分数量纲不可比，线性加权要反复调参。RRF 只用名次融合，两路各取 top-20，零调参，且单路召回失效时另一路仍能兜住。
 
 **扫描件 PDF 走本地 OCR，不调云 API**
 RapidOCR + PP-OCRv4，依赖增量 26 MB，字符相似度 0.99，1.1~2.9 s/页；带文字层的 PDF 完全不受影响（0.09 s 走原路径）。代价是首次 0.6 s 引擎初始化。
@@ -36,20 +36,20 @@ server/api/           路由与请求校验（不写 SQL）
   │
 server/services/      业务编排
   │
-  ├─ server/rag/      纯算法：解析 / 切分 / 嵌入 / BM25 / RRF / 生成
+  ├─ server/rag/      纯算法：解析 / 切分 / 嵌入 / 关键词 / RRF / 生成
   └─ server/db + core 全部 SQL · 配置 / 错误 / 日志 / 存储
 ```
 
-一次问答经过：问句 → 嵌入 → dense top-k + BM25 top-k → RRF 融合 → 上下文拼装 → DeepSeek 流式 → SSE（`citations` → `delta`* → `done`）。
+一次问答经过：问句 → 嵌入 → dense top-k + 关键词 top-k → RRF 融合 → 上下文拼装 → DeepSeek 流式 → SSE（`citations` → `delta`* → `done`）。
 
 ## 实测数据
 
 | 项 | 结果 | 说明 |
 | --- | --- | --- |
-| 检索（8,935 块） | **31.1 ms** | dense + BM25 + RRF 融合，连接池化后 |
+| 检索（280 块） | **38~44 ms** | dense + PG 全文 + RRF；8,680 块低 df 查询 6.56 ms |
 | 向量检索单项 | **4.04 ms** | HNSW，8,935 块 |
 | SSE 首字节 | **1.64 s** | 含检索与 DeepSeek 首 token |
-| 启动同步初始化 | **18.2~23.0 s** | 解析库 0.5~1.2 / 模型 8.0~11.3 / BM25 10.0 s |
+| 启动同步初始化 | **18.2~23.0 s** | 解析库 0.5~1.2 / 模型 8.0~11.3（BM25 构建已移除） |
 | 扫描件 OCR | **1.09~2.07 s/页** | 120 dpi，字符相似度 0.99 |
 | 检索质量 | **Recall@5 83.1%** · faithfulness 0.963 | 259 题，RAGAS + DeepSeek 判分 |
 
@@ -84,7 +84,7 @@ cd web && npm install && npm run dev    # 另开终端，访问 http://127.0.0.1
 | 后端 | Python 3.11+ / FastAPI / Uvicorn |
 | 数据库 | PostgreSQL 17 + pgvector 0.8.5 |
 | 嵌入 | `BAAI/bge-small-zh-v1.5`（CPU，512 维） |
-| 检索 | dense + BM25（bm25s）+ RRF |
+| 检索 | dense + PostgreSQL `tsvector` + RRF |
 | 生成 | DeepSeek（流式） |
 | 前端 | React 18 + Vite + TypeScript |
 | 存储 | MinIO（S3 兼容）/ 本地目录 |

@@ -62,7 +62,7 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
  * 上传专用：multipart 不做 JSON header。
  * 一次请求提交整批（1~20 个，04 v0.6 / FR-1）：后端按提交顺序串行处理，
  * 并在**整批结束后重建一次关键词索引**再返回 —— 所以前端要批量提交，
- * 否则 N 个文件会触发 N 次 BM25 全量重建。
+ * 否则 N 个文件会走 N 次重复的入库流程。
  */
 export async function uploadMany(files: File[]): Promise<UploadItem[]> {
   const form = new FormData()
