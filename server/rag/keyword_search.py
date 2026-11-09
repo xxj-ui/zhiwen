@@ -68,17 +68,25 @@ def to_tsquery_text(tokens: list[str]) -> str:
     """分词结果 → `to_tsquery('simple', ...)` 的 OR 表达式：`'a' | 'b' | 'c'`。
 
     词用单引号包裹（一个词 = 一个 lexeme），内部的单引号双写转义。
-    过滤顺序：空 → 停用词 → 纯标点。全被过滤掉时返回空串，调用方应视为"无有效查询词"。
+    过滤顺序：空 → 停用词 → 纯标点 → **去重**（保持首次出现顺序）。
+    全被过滤掉时返回空串，调用方应视为"无有效查询词"。
+
+    为什么要去重：问题里重复的词（「三次握手为什么是三次」→ 三次 ×2）会让 tsquery
+    出现重复 lexeme，`ts_rank_cd` 对同一词重复计数，分数被无谓抬高；语义上也没有增量。
 
     写入侧用的是 `to_tsvector('simple', 空格拼接的原词)`,两侧必须同源，
     否则切法不一致会静默检索不到。
     """
     parts = []
+    seen: set[str] = set()
     for t in tokens:
         if not t or t in _STOPWORDS:
             continue
         if not _HAS_WORD.search(t):
             continue
+        if t in seen:
+            continue
+        seen.add(t)
         parts.append("'" + t.replace("'", "''") + "'")
     return " | ".join(parts)
 

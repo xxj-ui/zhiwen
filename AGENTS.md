@@ -10,7 +10,7 @@
   - **目录**：后端 5 层——`server/rag/`（纯算法：loaders / splitter / embedder / keyword_search / rrf / llm）、`server/db/`（所有 SQL：pool / documents / chunks / conversations）、`server/services/`（编排：documents / retrieval / chat / history / health / warmup）、`server/api/`（routes / schemas / deps）、`server/core/`（config / errors / logging / timeutil / storage / migrations_check），根目录只留 `app.py` 与 `main.py`，地图见 [server/README.md](server/README.md)，CLI 入口 `python -m server.main`。
   - **已交付**：上传／列表／删除／健康检查、问答 SSE（`citations` → `delta`* → `done`）、历史列表·详情·删除、前端两页（`web/`，问答 + 知识库）、文档片段只读预览（FR-8）、多轮会话（FR-9，历史 5 轮 · ≤4000 字符）、回答按 Markdown(GFM) 子集渲染（`react-markdown` + `remark-gfm`，含 `**xxx **` 容错与 `[n]` 上标徽章）、MinIO 对象存储后端、yoyo 版本化迁移、关键词检索下沉 PG tsvector + GIN（V003，进程内索引整体移除）、检索连接池化与两路连接复用、启动同步初始化、扫描件 PDF 的 OCR 兜底（RapidOCR + pypdfium2，SRS FR-1）。**9 个接口 + 前端交互闭环**。
   - **基础设施**：4 张表已落地真库 `zhiwen`；DDL 由 `scripts/sql/migrations/`（yoyo-migrations，V001 基线 + V002 多轮）版本化管理、`schema.sql` 降为全量快照（[03 §6.7](docs/design/03.数据库设计.md)），入口 `scripts/migrate.py`；`docker-compose.yml` 起 pgvector + MinIO（均绑 `127.0.0.1`）；`requirements.txt` 与启动脚本已就绪。
-  - **关键实测**：单次检索 **38~44 ms**（280 块全链路；8,680 块低 df 6.56 ms、存储 2.8 KB/块、上传零重建）；SSE 首字节 **1.64 s**；启动同步初始化 **18.2~23.0 s**（解析库 0.5~1.2 s / 模型 8.0~11.3 s；BM25 构建已移除），两项就绪后才对外服务，预热期间客户端连不上（不是连上后阻塞）。累计断言：M1+M2 74 项、多轮 43 项、前端 7 场景 0 error。OCR 实测：相似度 **0.99**、首屏 2.9 s 之后 **1.09~2.07 s/页**、3 页扫描件整链路 **6.5 s**、带文字层 PDF **0.09 s 零 OCR**。
+  - **关键实测**：单次检索 **20.7 ms**（280 块热态 n=15；8,680 块低 df 6.56 ms、存储 2.8 KB/块、上传零重建）；SSE 首字节 **1.64 s**；启动同步初始化 **18.2~23.0 s**（解析库 0.5~1.2 s / 模型 8.0~11.3 s；BM25 构建已移除），两项就绪后才对外服务，预热期间客户端连不上（不是连上后阻塞）。累计断言：M1+M2 74 项、多轮 43 项、前端 7 场景 0 error。OCR 实测：相似度 **0.99**、首屏 2.9 s 之后 **1.09~2.07 s/页**、3 页扫描件整链路 **6.5 s**、带文字层 PDF **0.09 s 零 OCR**。
   - **文档版本**：[SRS](docs/SRS.md) v0.19、[00 需求分析](docs/00.需求分析.md) v0.5、[01 功能模块](docs/design/01.功能模块梳理.md) v1.1、[02 整体架构](docs/design/02.整体架构设计.md) v0.22、[03 数据库](docs/design/03.数据库设计.md) v0.11、[04 API](docs/design/04.API接口设计.md) v0.14、[05 评审结果](docs/design/05.设计方案评审结果.md) v0.5、[06 遗留问题](docs/design/06.遗留问题清单.md) v0.31、[07 测试用例](docs/design/07.测试用例清单.md) v0.14、[08 性能基线](docs/design/08.性能基线实测.md) v0.5、[09 前端详细设计](docs/design/09.前端详细设计.md) v0.5、[10 多轮会话设计](docs/design/10.多轮会话设计.md) v0.4、[11 RAG评测](docs/design/11.RAG评测设计.md) v1.3。
 - **权威文档**：
   - 需求分析：[docs/00.需求分析.md](docs/00.需求分析.md)（角色 / 场景 / 用例 / 优先级 / 追溯）
@@ -124,7 +124,7 @@
 
 | 日期 | 变更 |
 | --- | --- |
-| 2026-11-09 | **关键词检索下沉 PostgreSQL**：bm25s 与进程内索引生命周期整体移除，改 `rag_chunks.content_tsv` + GIN（V003）；分词留在应用层 jieba，查询手工拼 OR tsquery + 停用词（`plainto_tsquery` 是 AND 语义、`ts_rank_cd` 不做 IDF）。实测 8,680 块低 df 6.56 ms、存储 2.8 KB/块、上传零重建；280 块全链路 38~44 ms 是代价。文档版本指针 02 v0.22、03 v0.11、06 v0.31。 |
+| 2026-11-09 | **关键词检索下沉 PostgreSQL**：bm25s 与进程内索引生命周期整体移除，改 `rag_chunks.content_tsv` + GIN（V003）；分词留在应用层 jieba，查询手工拼 OR tsquery + 停用词（`plainto_tsquery` 是 AND 语义、`ts_rank_cd` 不做 IDF）。实测 8,680 块低 df 6.56 ms、存储 2.8 KB/块、上传零重建；280 块热态全链路 20.7 ms（比 bm25s 基线 18.4 ms 慢 2.3 ms）。文档版本指针 02 v0.22、03 v0.11、06 v0.31。 |
 | 2026-11-06 | **项目改名**：ragdemo → zhiwen（中文名「知问 · 个人知识库问答」）。代码（FastAPI title、logger 名、前端包名）、配置（compose 项目名/容器名/库名/桶名）、13 份文档标题与元信息全部同步；数据库 pg_dump 迁移到 zhiwen，容器按新名重建（卷名固定，数据无损）。README 暂未改（内容讨论中）。各文档版本号 +1 并留痕。 |
 | 2026-11-06 | §0 文档版本指针更新（SRS v0.17、02 v0.20、06 v0.29、08 v0.4）；四份文档同步**公开前脱敏**修订：去掉本机绝对路径与 AI 工具名，模型缓存默认改为 `HF_HOME`（`~/.cache/huggingface`）。规则条款未改动。 |
 | 2026-11-06 | §0「已交付」补**回答按 Markdown(GFM) 子集渲染**（`react-markdown` 9 + `remark-gfm` 4，含 `**xxx **` 容错与 `[n]` 上标徽章）；文档版本指针更新（SRS v0.16、04 v0.12、09 v0.3）。规则条款未改动。 |
