@@ -6,7 +6,7 @@
 | --- | --- |
 | 首次 import torch / transformers | 88 s（磁盘冷缓存；热缓存 17.6 s） |
 | bge-small-zh 权重加载 + 首次编码 | 0.3 ~ 23 s |
-| BM25 索引构建（4,576 块） | 10.7 s |
+| BM25 索引构建（4,576 块；V003 后已移除该步骤） | 10.7 s |
 | 解析库 import（pdfplumber / python-docx / openpyxl） | 每个 0.3~1 s（推断） |
 
 这些成本如果留给"第一个提问 / 第一次上传"，界面就是无提示的等待。本模块在 lifespan
@@ -84,14 +84,15 @@ def run_blocking(container: Any) -> None:
         return
     logger.info("  向量模型就绪 %.1fs", time.perf_counter() - t0 - t_parsers)
 
+    # 关键词索引由 PG GIN 倒排维护（V003），无需在启动时构建；
+    # 这里只做一次轻量探测，确认 content_tsv 列与索引可用（迁移未执行时尽早暴露）。
     try:
-        # 与检索同一条路径：服务层传的也是 container.chunks.fetch_all
-        container.bm25.ensure_built(container.chunks.fetch_all)
+        n = container.chunks.count()
+        logger.info("  关键词索引就绪（PG tsvector），%s 块", n)
     except Exception:  # noqa: BLE001
         container.warmup_state = "failed"
-        logger.exception("预热失败：BM25 构建出错（服务仍启动，首个请求会重试）")
+        logger.exception("预热失败：关键词索引不可用（检查 V003 迁移是否已执行）")
         return
-    logger.info("  BM25 索引就绪 %s 块", container.bm25.size)
 
     container.warmup_state = "ready"
     logger.info("预热完成：合计 %.1fs，服务开始接收请求", time.perf_counter() - t0)

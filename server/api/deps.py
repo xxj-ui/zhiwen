@@ -14,7 +14,6 @@ from server.db import pool as db_pool
 from server.db.chunks import PgChunkRepository
 from server.db.conversations import ConversationRepository
 from server.db.documents import DocumentRepository
-from server.rag.bm25_index import Bm25Index
 
 
 class Container:
@@ -27,7 +26,7 @@ class Container:
         self.conversations = ConversationRepository(settings.db_dsn)
         # 检索走连接池（02 S-09）：pool 惰性创建，首次检索时才建，不拖慢启动
         self.chunks = PgChunkRepository(settings.db_dsn, pool_factory=self.pool)
-        self.bm25 = Bm25Index()
+        # 关键词检索走 PG 全文索引（V003）：进程内不再持有 BM25 索引
         # 原文件存储后端（local / minio）：进程内建一次，上传、覆盖、删除共用
         self.store = storage.build_store(settings)
         # 写锁（04 §3.7 并发写 / 02 S-01 单 worker）：上传、覆盖、删除串行，后到者等待而不是 500

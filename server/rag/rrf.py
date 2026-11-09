@@ -1,6 +1,6 @@
 """第 6 步：多路召回融合（RRF）
 
-把稠密检索和 BM25 的结果按「排名」融合，不看原始分数。
+把稠密检索和关键词检索的结果按「排名」融合，不看原始分数。
 
 RRF（Reciprocal Rank Fusion）公式:
 
@@ -10,7 +10,7 @@ RRF（Reciprocal Rank Fusion）公式:
     rank_i(d)  文档 d 在第 i 路里的名次（从 1 开始）
     k          平滑常数，通常取 60
 
-为什么只用排名：余弦相似度是 0~1，BM25 是无界分数，两者量纲不同，
+为什么只用排名：余弦相似度是 0~1，关键词打分是无界的，两者量纲不同，
 不能相加也不能取平均；排名是唯一可比的量。
 
 k=60 的作用是把排名带来的差距压平：
@@ -33,7 +33,7 @@ def rrf_fuse(
 
     参数:
         named_results: [(路由名, 结果列表), ...]，例如
-                       [("dense", dense_results), ("bm25", keyword_results)]
+                       [("dense", dense_results), ("keyword", keyword_results)]
         k:             RRF 平滑常数
         top_k:         融合后保留多少条
 

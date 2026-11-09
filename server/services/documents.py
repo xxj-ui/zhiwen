@@ -6,7 +6,7 @@
   3. 解析（空结果视为失败）→ 切分 → 向量化
   4. 原文件就位（**事务提交之前**）：local 走 rename，minio 走 put_object
   5. 一个事务内：upsert documents → 全量替换 chunks → 更新 chunk_count
-  6. 提交后删旧原文件/旧对象；BM25 置失效
+  6. 提交后删旧原文件/旧对象（关键词索引由 PG 自动维护，无需失效）
 失败路径：任一步失败 → 删除刚写入的原文件或对象、旧数据与旧原文件保持原样（BR-2）。
 数据库完全不可用 → 抛 `DB_UNAVAILABLE`（请求级 503，不塞进 items[].error）。
 
@@ -26,7 +26,6 @@ from psycopg_pool import PoolClosed, PoolTimeout
 from server.core import storage
 from server.core.errors import ERROR_CODES, DependencyUnavailable, NotFoundError
 from server.rag import embedder, loaders, splitter
-from server.services import indexing
 from server.core.timeutil import to_local_iso
 
 logger = logging.getLogger("zhiwen.document_service")
@@ -189,7 +188,6 @@ async def upload(container: Any, upload_file: Any) -> dict:
 
         if existing is not None:
             container.store.delete_ref(existing["stored_path"])
-        container.bm25.invalidate()
 
     logger.info(
         "入库成功 file=%s doc_id=%s chunks=%s overwritten=%s size=%s",
@@ -208,7 +206,7 @@ async def upload(container: Any, upload_file: Any) -> dict:
 def document_chunks(container: Any, document_id: int, offset: int = 0, limit: int = 20) -> dict:
     """文档预览（FR-8）：按 chunk_index 顺序分页读出该文档的片段。
 
-    只读、不碰 BM25、不加写锁。片段直接取自 rag_chunks.content，所以原文件
+    只读、不加写锁。片段直接取自 rag_chunks.content，所以原文件
     丢失（例如 uploads/ 被清空）也能看——核对引用时这点很关键。
     """
     try:
@@ -269,7 +267,4 @@ async def delete_document(container: Any, document_id: int) -> None:
             raise DependencyUnavailable("DB_UNAVAILABLE") from exc
 
         container.store.delete_ref(doc["stored_path"])
-        container.bm25.invalidate()
-        # 删除不阻塞响应：后台重建，赶在用户下一次提问之前把索引恢复好
-        indexing.warm_in_background(container)
     logger.info("删除成功 doc_id=%s file=%s", document_id, doc["filename"])

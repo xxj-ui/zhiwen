@@ -17,8 +17,8 @@ transformers==5.8.0
 torch==2.11.0
 numpy==2.4.3
 jieba==0.42.1
-# 关键词检索后端（稀疏矩阵 BM25；分词仍用上面的 jieba，bm25s 只负责打分）
-bm25s==0.3.16
+# 关键词检索：改用 PostgreSQL tsvector + GIN 倒排（V003 迁移），
+# 分词仍是 jieba，打分交给数据库的 ts_rank_cd，无需额外 Python 依赖
 
 # 大模型（OpenAI 兼容协议，指向 DeepSeek）
 openai==2.32.0

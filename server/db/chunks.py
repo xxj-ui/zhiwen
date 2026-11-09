@@ -11,6 +11,8 @@
 import os
 from contextlib import contextmanager
 
+from server.rag.keyword_search import tokenize
+
 TABLE_NAME = "rag_chunks"
 
 def _require_dsn(explicit: str | None = None) -> str:
@@ -64,6 +66,17 @@ class PgChunkRepository:
         with self._connect() as own:
             yield own
 
+    @contextmanager
+    def session(self):
+        """一次检索内复用同一个连接（同样走池）。
+
+        为什么要这个：池配置了 `check_connection` 探活，每次出池都多一次往返
+        （实测 ~5 ms）。检索要跑 dense + keyword 两条 SQL，各取一次连接就是
+        两次探活；复用后只付一次。纯内存索引时代没有这笔开销，改造后必须补上。
+        """
+        with self._reader() as conn:
+            yield conn
+
     # ------------------------------------------------------------------
     # 建表
     # ------------------------------------------------------------------
@@ -80,7 +93,7 @@ class PgChunkRepository:
     # 检索
     # ------------------------------------------------------------------
 
-    def search(self, query_vector: list[float], top_k: int = 5) -> list[dict]:
+    def search(self, query_vector: list[float], top_k: int = 5, conn=None) -> list[dict]:
         """按余弦相似度返回 top_k 个 chunk（相似度从高到低）。
 
         注意：
@@ -101,8 +114,59 @@ class PgChunkRepository:
             ORDER BY c.embedding <=> %s::vector
             LIMIT %s
         """
-        with self._reader() as conn:
+        if conn is not None:
             rows = conn.execute(sql, (literal, literal, top_k)).fetchall()
+        else:
+            with self._reader() as c:
+                rows = c.execute(sql, (literal, literal, top_k)).fetchall()
+
+        return [
+            {
+                "id": row["id"],
+                "source": row["source"],
+                "page": row["page"],
+                "chunk_index": row["chunk_index"],
+                "content": row["content"],
+                "filename": row["filename"],
+                "score": float(row["score"]),
+            }
+            for row in rows
+        ]
+
+    def search_keyword(self, query_text: str, top_k: int = 5, conn=None) -> list[dict]:
+        """关键词检索（PG 全文索引 + ts_rank_cd），返回结构同 `search()`。
+
+        `query_text` 是 `to_tsquery('simple', ...)` 的 **OR 表达式**
+        （由 `rag/keyword_search.tokenize_query` 生成，形如 `'线程' | '池' | '参数'`）。
+
+        为什么不用 `plainto_tsquery`：它生成 AND 语义，长问题会退化成
+        "所有词都必须出现"，实测只命中 0~1 条。BM25 是 OR 语义，必须手工拼 `|`。
+
+        用 `ts_rank_cd`（cover density）而不是 `ts_rank`：额外考虑词距，
+        词挨得越近分越高，对中文短语（"三次握手"）比纯词频更贴合语义。
+        """
+        if top_k <= 0:
+            raise ValueError("top_k 必须大于 0")
+        if not query_text or not query_text.strip():
+            return []
+
+        sql = f"""
+            WITH q AS (SELECT to_tsquery('simple', %s) AS tsq)
+            SELECT c.id, c.source, c.page, c.chunk_index, c.content,
+                   d.filename AS filename,
+                   ts_rank_cd(c.content_tsv, q.tsq) AS score
+            FROM {TABLE_NAME} c
+            LEFT JOIN documents d ON d.id = c.document_id
+            CROSS JOIN q
+            WHERE c.content_tsv @@ q.tsq
+            ORDER BY score DESC, c.id
+            LIMIT %s
+        """
+        if conn is not None:
+            rows = conn.execute(sql, (query_text, top_k)).fetchall()
+        else:
+            with self._reader() as c:
+                rows = c.execute(sql, (query_text, top_k)).fetchall()
 
         return [
             {
@@ -118,7 +182,7 @@ class PgChunkRepository:
         ]
 
     def fetch_all(self) -> list[dict]:
-        """读出全部 chunk（不带向量），给 BM25 这类内存索引使用。"""
+        """读出全部 chunk（不带向量）。CLI 遍历与回填脚本使用。"""
         sql = f"""
             SELECT c.id, c.source, c.page, c.chunk_index, c.content,
                    d.filename AS filename
@@ -183,13 +247,16 @@ class PgChunkRepository:
                 row["chunk_index"],
                 row["text"],
                 _to_vector_literal(vector),
+                # 分词在应用层做（jieba），PG 侧只按空白切 + 小写化（simple 配置）。
+                # 索引与查询必须同一套规则，见 rag/keyword_search.tokenize_query。
+                " ".join(tokenize(row["text"])),
             )
             for row, vector in zip(rows, vectors)
         ]
         sql = f"""
             INSERT INTO {TABLE_NAME}
-                (document_id, source, page, chunk_index, content, embedding)
-            VALUES (%s, %s, %s, %s, %s, %s::vector)
+                (document_id, source, page, chunk_index, content, embedding, content_tsv)
+            VALUES (%s, %s, %s, %s, %s, %s::vector, to_tsvector('simple', %s))
         """
         with self._using(conn) as c:
             with c.cursor() as cur:

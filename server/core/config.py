@@ -85,7 +85,7 @@ class Settings:
     # 5 s 仍满足 04 §4.8 注 3「秒级返回」。
     health_probe_timeout: float = 5.0
 
-    # 启动预热（M8）：把首次 import / 模型加载 / BM25 构建挪到启动后台，
+    # 启动预热（M8）：把首次 import / 模型加载挪到启动后台，
     # 否则这三笔一次性成本全压在第一问上（实测冷启动约 105 s）。可用 RAG_WARMUP=0 关掉。
     warmup_enabled: bool = True
 

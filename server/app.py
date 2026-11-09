@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
     migrations_check.warn_if_behind(
         container.settings.db_dsn, PROJECT_ROOT / "scripts" / "sql" / "migrations"
     )
-    # M8 启动预热：**同步**做掉模型加载 / BM25 构建 / 解析库 import，
+    # M8 启动预热：**同步**做掉模型加载 / 解析库 import，
     # lifespan 返回前 uvicorn 不接管请求 → "能连上" 就等于 "能干活"。
     if container.settings.warmup_enabled:
         await asyncio.to_thread(warmup.run_blocking, container)
