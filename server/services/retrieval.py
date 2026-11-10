@@ -13,21 +13,21 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from server.rag.embedder import EMBED_CONCURRENCY, embed_query
+from server.rag.embedder import EMBED_CONCURRENCY, TEI_URL, embed_query
 from server.rag.keyword_search import tokenize_query
 from server.rag.rrf import rrf_fuse
 
-# 编码专用线程池（大小 = 编码并发上限，默认 4）。
+# 编码专用线程池。
 #
-# 为什么必须专用：`asyncio.to_thread` 用的是解释器**默认池**（min(32, cpu+4) = 20
-# 个 worker），而一次问答要占它 3 次——读历史、检索、落库。检索是 CPU 密集型，
-# 和 IO 任务混在同一个池里会互相顶：检索把 20 个槽位占满，落库就得排队。
+# 进程内编码：大小 = 编码并发上限（默认 4）。4 × 4 线程 = 16 = 核数，多开只会抢核。
 #
-# 反面教材（2026-11-10 实测）：只在 encode 外层加 Semaphore(4) 但仍走默认池 ——
-# 20 个线程里只有 4 个真在算，另外 16 个卡在锁上白占槽位，落库和读历史全被堵死，
-# 64 并发吞吐仍是 6.02 问/秒（与改之前持平）。拆成独立池后两类任务互不阻塞。
+# 外置编码（RAG_TEI_URL）：**必须放大**。编码不占本进程 CPU 了，而远端服务靠攒批
+# 提升吞吐 —— 这里限成 4 就等于把攒批的上限钉死在 4。实测：worker=4 时远端
+# max_batch 只有 4、109 批才处理 289 条；放大到 32 后一次能攒 32 条（实测 batch=32
+# 比逐条快 5.3 倍）。
+_EMBED_WORKERS = 32 if TEI_URL else max(1, EMBED_CONCURRENCY)
 _embed_pool = ThreadPoolExecutor(
-    max_workers=max(1, EMBED_CONCURRENCY), thread_name_prefix="embed"
+    max_workers=_EMBED_WORKERS, thread_name_prefix="embed"
 )
 
 

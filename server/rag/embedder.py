@@ -45,6 +45,44 @@ EMBED_CONCURRENCY = int(os.getenv("RAG_EMBED_CONCURRENCY", "4"))
 
 _embed_slots = threading.BoundedSemaphore(max(1, EMBED_CONCURRENCY))
 
+# ----------------------------------------------------------------------
+# 外置嵌入服务（P0-2）
+# ----------------------------------------------------------------------
+# 设置 RAG_TEI_URL（如 http://127.0.0.1:8081）后，编码改走 HTTP，本进程不再加载
+# 模型、也不再消耗 CPU —— 这是把「编码占满 16 核导致事件循环被饿」的根因搬走。
+# 不设该变量则完全走原来的进程内路径，行为不变，便于 A/B 对比和回退。
+TEI_URL = (os.getenv("RAG_TEI_URL") or "").rstrip("/")
+TEI_BATCH = int(os.getenv("RAG_TEI_BATCH", "32"))
+
+_tei_client = None
+
+
+def _get_tei_client():
+    """进程内复用长连接池（每次新建 Client 要 ~5 ms 握手，编码本身才 5~20 ms）。"""
+    global _tei_client
+    if _tei_client is None:
+        import httpx
+
+        _tei_client = httpx.Client(
+            base_url=TEI_URL,
+            timeout=httpx.Timeout(300.0, connect=5.0),
+            limits=httpx.Limits(max_connections=16, max_keepalive_connections=16),
+        )
+    return _tei_client
+
+
+def _tei_embed(texts: list[str]) -> list[list[float]]:
+    """调 TEI 的 POST /embed。按 TEI_BATCH 分批，避免超过容器的 max-client-batch-size。"""
+    client = _get_tei_client()
+    out: list[list[float]] = []
+    for i in range(0, len(texts), TEI_BATCH):
+        resp = client.post(
+            "/embed", json={"inputs": texts[i : i + TEI_BATCH], "normalize": True}
+        )
+        resp.raise_for_status()
+        out.extend(resp.json())
+    return out
+
 _model = None
 
 
@@ -82,6 +120,9 @@ def embed_documents(
     if not texts:
         return []
 
+    if TEI_URL:
+        return _tei_embed(texts)
+
     vectors = _get_model().encode(
         texts,
         batch_size=batch_size,
@@ -101,6 +142,9 @@ def embed_query(text: str) -> list[float]:
     text = (text or "").strip()
     if not text:
         raise ValueError("查询内容不能为空")
+
+    if TEI_URL:
+        return _tei_embed([QUERY_INSTRUCTION + text])[0]
 
     # 闸门放在最外层：连模型懒加载一起串行，避免冷启动瞬间 20 个线程同时
     # 触发 _get_model() 抢着加载模型。

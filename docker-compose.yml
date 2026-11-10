@@ -68,6 +68,53 @@ services:
         aliases:
           - minio                       # 同网络的其他应用用 http://minio:9000
 
+  # 嵌入服务（P0-2）：把向量编码从 Web 进程里搬出来，独立进程 + 内部攒批。
+  #
+  # 为什么需要它：编码在 uvicorn 进程里跑时，4 并发 × 4 线程 = 16 线程正好占满
+  # 16 核，事件循环（负责转发 DeepSeek 的流式包）抢不到 CPU，表现为「首字节从
+  # 1.0 s 涨到 2.8 s」。搬出来之后：编码只在 tei 容器里吃 CPU，Web 进程的
+  # 事件循环有核可用；且 TEI 会把并发请求攒成 batch（实测 batch=32 比逐条快 5.3 倍）。
+  #
+  # 后端通过 RAG_TEI_URL 启用；不设该变量则继续用进程内模型（行为完全不变）。
+  tei:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8.0
+    container_name: zhiwen-tei
+    command:
+      # 直接指向本地快照路径，不走 HF 下载。
+      # 为什么：本机连 hf.co 很慢，TEI 每次启动会先等 20 s 超时找 model.onnx，
+      # 再回退 candle 后端（用这里的 model.safetensors）。指本地路径可跳过这段等待。
+      # hash 变了（重新拉模型）就要同步改这一行。
+      - --model-id
+      - /data/hub/models--BAAI--bge-small-zh-v1.5/snapshots/7999e1d3359715c523056ef9478215996d62a620
+      - --port
+      - "80"
+      # 最多攒 32 条一次前向：与 embedder.embed_documents 的 batch_size 对齐
+      - --max-client-batch-size
+      - "32"
+    environment:
+      # 复用宿主机已有的 HF 缓存（只读挂载），不重复下载模型
+      HF_HOME: /data
+      HUGGINGFACE_HUB_CACHE: /data/hub
+      # 本机连 hf.co 很慢，TEI 会先试 ONNX 下载、失败后回退 candle（safetensors）。
+      # 强制离线让它跳过下载，直接用缓存里的 safetensors 走 candle 后端。
+      HF_HUB_OFFLINE: "1"
+      TZ: Asia/Shanghai
+    volumes:
+      # 复用宿主机已有的 HF 缓存，不重复下载模型。
+      # 不能加 :ro —— TEI 首次启动会把 safetensors 导出成 model.onnx 写回该目录。
+      - ${HF_HOME:-~/.cache/huggingface}:/data
+    ports:
+      - "127.0.0.1:8088:80"             # 宿主 8088 → 容器 80（8081 在本机被占用）
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - infra-net
+
   # 一次性作业：建 bucket + 关匿名访问 + 设配额；跑完即退出（restart: "no"）
   minio-init:
     image: minio/mc:latest
