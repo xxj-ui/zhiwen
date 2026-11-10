@@ -39,7 +39,10 @@ class Settings:
 
     # 数据库连接池（02 S-09 / 06 A4）
     db_pool_min: int = 1
-    db_pool_max: int = 4
+    # 从 4 调到 16：每个问答要取 3 次连接（读历史 / 检索两路 SQL / 落库），
+    # 4 个连接在几十并发下会成为排队点。16 是「问答并发 ≈ 16 路」时的舒适值，
+    # 且远低于 PG 默认 max_connections=100。
+    db_pool_max: int = 16
     db_pool_timeout: float = 5.0
 
     # 多轮上下文（SRS FR-9 / 10.多轮会话设计 §6.1）
@@ -142,7 +145,7 @@ def load_settings() -> Settings:
         db_dsn=dsn,
         port=_env_int("RAG_PORT", 8000),
         db_pool_min=_env_int("RAG_DB_POOL_MIN", 1),
-        db_pool_max=_env_int("RAG_DB_POOL_MAX", 4),
+        db_pool_max=_env_int("RAG_DB_POOL_MAX", 16),
         db_pool_timeout=_env_float("RAG_DB_POOL_TIMEOUT", 5.0),
         history_max_turns=_env_int("RAG_HISTORY_MAX_TURNS", 5),
         history_char_budget=_env_int("RAG_HISTORY_CHAR_BUDGET", 4000),

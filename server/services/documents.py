@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,15 @@ logger = logging.getLogger("zhiwen.document_service")
 
 # 数据库侧故障统一映射成 503：连接失败 / 池超时 / 池已关闭
 DB_ERRORS = (psycopg.OperationalError, PoolTimeout, PoolClosed)
+
+# 上传路径的 CPU 任务（解析 / 切分 / 批量编码）走独立池，1 个 worker，天然串行。
+#
+# 为什么不复用默认池（20 槽）：这些任务耗时 0.5~5 s，而问答侧的读历史 / 检索 SQL /
+# 写库只有 5~12 ms —— 差 500 倍的任务混在同一个池里，一次上传就能占死几个槽，
+# 并发的问答立刻抖动（实测上传 1,500 块期间，问答首字节 1.14 s → 3.67 s）。
+# 单 worker 是刻意的：同时传多份时排队，而不是让 16 个核被多份解析同时抢；
+# 上传本来也不在热路径上，串行完全够用（3 页扫描件整链路 6.5 s）。
+_doc_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="doc")
 
 ALLOWED_SUFFIXES = {".pdf", ".docx", ".md", ".txt", ".xlsx", ".csv"}
 TABLE_SUFFIXES = {".xlsx", ".csv"}
@@ -103,14 +114,18 @@ async def upload(container: Any, upload_file: Any) -> dict:
         temp.unlink(missing_ok=True)
         return _item_error(filename, "EMPTY_FILE")
 
+    loop = asyncio.get_running_loop()
     try:
-        docs = await asyncio.to_thread(
-            loaders.load,
-            temp,
-            ocr=settings.ocr_enabled,
-            ocr_dpi=settings.ocr_dpi,
-            ocr_min_chars=settings.ocr_min_chars,
-            ocr_max_pages=settings.ocr_max_pages,
+        docs = await loop.run_in_executor(
+            _doc_pool,
+            partial(
+                loaders.load,
+                temp,
+                ocr=settings.ocr_enabled,
+                ocr_dpi=settings.ocr_dpi,
+                ocr_min_chars=settings.ocr_min_chars,
+                ocr_max_pages=settings.ocr_max_pages,
+            ),
         )
     except Exception as exc:
         logger.info("解析失败 file=%s err=%s", filename, exc)
@@ -123,16 +138,21 @@ async def upload(container: Any, upload_file: Any) -> dict:
         code = "TABLE_EMPTY" if suffix in TABLE_SUFFIXES else "PARSE_FAILED"
         return _item_error(filename, code)
 
-    chunks = await asyncio.to_thread(
-        splitter.split_documents,
-        docs,
-        settings.chunk_size,
-        settings.chunk_overlap,
-        settings.chunk_min_size,
+    chunks = await loop.run_in_executor(
+        _doc_pool,
+        partial(
+            splitter.split_documents,
+            docs,
+            settings.chunk_size,
+            settings.chunk_overlap,
+            settings.chunk_min_size,
+        ),
     )
     texts = [c["text"] for c in chunks]
     try:
-        vectors = await asyncio.to_thread(embedder.embed_documents, texts)
+        vectors = await loop.run_in_executor(
+            _doc_pool, partial(embedder.embed_documents, texts)
+        )
         container.model_state = "loaded"
     except Exception as exc:
         container.model_state = "failed"
