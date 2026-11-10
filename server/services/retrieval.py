@@ -10,11 +10,64 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from server.rag.embedder import embed_query
+from server.rag.embedder import EMBED_CONCURRENCY, embed_query
 from server.rag.keyword_search import tokenize_query
 from server.rag.rrf import rrf_fuse
+
+# 编码专用线程池（大小 = 编码并发上限，默认 4）。
+#
+# 为什么必须专用：`asyncio.to_thread` 用的是解释器**默认池**（min(32, cpu+4) = 20
+# 个 worker），而一次问答要占它 3 次——读历史、检索、落库。检索是 CPU 密集型，
+# 和 IO 任务混在同一个池里会互相顶：检索把 20 个槽位占满，落库就得排队。
+#
+# 反面教材（2026-11-10 实测）：只在 encode 外层加 Semaphore(4) 但仍走默认池 ——
+# 20 个线程里只有 4 个真在算，另外 16 个卡在锁上白占槽位，落库和读历史全被堵死，
+# 64 并发吞吐仍是 6.02 问/秒（与改之前持平）。拆成独立池后两类任务互不阻塞。
+_embed_pool = ThreadPoolExecutor(
+    max_workers=max(1, EMBED_CONCURRENCY), thread_name_prefix="embed"
+)
+
+
+def _resolve(
+    container: Any, top_k: int | None, recall_k: int | None, rrf_k: int | None
+) -> tuple[int, int, int]:
+    settings = container.settings
+    return (
+        settings.top_k if top_k is None else top_k,
+        settings.recall_k if recall_k is None else recall_k,
+        settings.rrf_k if rrf_k is None else rrf_k,
+    )
+
+
+def _prepare(question: str) -> tuple[list[float], str]:
+    """编码 + 分词。两者都是纯 CPU（jieba 持 GIL），必须一起待在专用池里。
+
+    为什么分词不能留在 `_fuse` 里：`_fuse` 跑在默认池（20 worker），而 jieba 是
+    纯 Python 计算、全程持 GIL —— 20 个线程同时分词等于串行 + 高频线程切换。
+    实测 32 并发下 `tokenize_query` P50 从 1 ms 膨胀到 **1686 ms**（×1686），
+    一度被误判成"检索慢""LLM 抢 GIL"。挪进 4 线程的专用池后回到毫秒级。
+    """
+    return embed_query(question), tokenize_query(question)
+
+
+def _fuse(
+    container: Any,
+    vector: list[float],
+    query_text: str,
+    top_k: int,
+    recall_k: int,
+    rrf_k: int,
+) -> list[dict]:
+    """召回 + 融合（纯 IO：2 条 SQL + 纯函数 RRF，不含编码与分词）。"""
+    repo = container.chunks
+    # 两路查询共用一个连接：池每次出池都要探活，分两次取就是两次往返（实测 ~5 ms/次）
+    with repo.session() as conn:
+        dense = repo.search(vector, top_k=recall_k, conn=conn)
+        keyword = repo.search_keyword(query_text, top_k=recall_k, conn=conn)
+    return rrf_fuse([("dense", dense), ("keyword", keyword)], k=rrf_k, top_k=top_k)
 
 
 def retrieve(
@@ -24,23 +77,28 @@ def retrieve(
     recall_k: int | None = None,
     rrf_k: int | None = None,
 ) -> list[dict]:
-    """两路召回 + RRF 融合，返回 top_k 条（每条形如 04 的 citations 元素原料）。"""
-    settings = container.settings
-    top_k = settings.top_k if top_k is None else top_k
-    recall_k = settings.recall_k if recall_k is None else recall_k
-    rrf_k = settings.rrf_k if rrf_k is None else rrf_k
-
-    repo = container.chunks
-    # 嵌入与分词不占数据库连接，先算好
-    vector = embed_query(question)
-    query_text = tokenize_query(question)
-    # 两路查询共用一个连接：池每次出池都要探活，分两次取就是两次往返（实测 ~5 ms/次）
-    with repo.session() as conn:
-        dense = repo.search(vector, top_k=recall_k, conn=conn)
-        keyword = repo.search_keyword(query_text, top_k=recall_k, conn=conn)
-    return rrf_fuse([("dense", dense), ("keyword", keyword)], k=rrf_k, top_k=top_k)
+    """同步版（CLI / 脚本）：编码 + 分词 + 召回 + 融合，返回 top_k 条。"""
+    top_k, recall_k, rrf_k = _resolve(container, top_k, recall_k, rrf_k)
+    vector, query_text = _prepare(question)
+    return _fuse(container, vector, query_text, top_k, recall_k, rrf_k)
 
 
 async def aretrieve(container: Any, question: str, **kwargs: Any) -> list[dict]:
-    """异步包装：检索是同步阻塞的（psycopg + 模型），放进线程池，别堵事件循环。"""
-    return await asyncio.to_thread(retrieve, container, question, **kwargs)
+    """异步版（HTTP 路径）。
+
+    分工：
+      1. **编码 + 分词** → 专用池（`_embed_pool`，大小 = RAG_EMBED_CONCURRENCY）。
+         两者都是纯 CPU，jieba 还持 GIL，必须共用一个**小**池，否则线程数一多
+         就互相拖死（实测 32 并发下分词 ×1686 膨胀）。
+      2. **2 条 SQL + RRF** → 默认池（IO，与读历史、落库共享）。
+
+    事件循环夹在两个 await 之间保持可调度，LLM 的流式响应不会被 CPU 任务压住。
+    """
+    top_k, recall_k, rrf_k = _resolve(
+        container, kwargs.get("top_k"), kwargs.get("recall_k"), kwargs.get("rrf_k")
+    )
+    loop = asyncio.get_running_loop()
+    vector, query_text = await loop.run_in_executor(_embed_pool, _prepare, question)
+    return await asyncio.to_thread(
+        _fuse, container, vector, query_text, top_k, recall_k, rrf_k
+    )
