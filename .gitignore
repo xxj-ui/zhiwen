@@ -9,9 +9,6 @@ evals/runs/
 *.dump
 *.zip
 
-# 本地分析笔记（不入库）
-/*优化设计*.md
-
 # Python
 __pycache__/
 *.py[cod]
