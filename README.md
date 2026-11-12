@@ -42,6 +42,98 @@ server/services/      业务编排
 
 一次问答经过：问句 → 嵌入 → dense top-k + 关键词 top-k → RRF 融合 → 上下文拼装 → DeepSeek 流式 → SSE（`citations` → `delta`* → `done`）。
 
+## 文档入库流程
+
+每个文件走完八步才进知识库。解析按格式分两支：PDF 逐页判质量、不达标才 OCR；其他五种直接调对应解析库。任一步失败只影响这一个文件，旧数据与旧原文件保持不动。
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 200, "nodeSpacing": 24, "rankSpacing": 34, "padding": 10, "curve": "basis"}}}%%
+flowchart TB
+
+    subgraph ROW1["接收与解析 ①~③"]
+        direction LR
+        FE(["前端知识库页<br/>逐个文件提交"])
+        S1["① 校验<br/>文件名 · 扩展名<br/>大小 · 文件数"]
+        S2["② 中转落盘<br/>data/tmp<br/>超 50 MB 中断"]
+        DISP["③ 解析<br/>按扩展名分发"]
+        P["【PDF】逐页抽文字层<br/>不达标改走 OCR<br/>两路不过则该页跳过<br/>可用页不足整份拒绝"]
+        O["【其他五种】<br/>按扩展名用 python 库解析<br/>编码按 UTF-8 → GB18030<br/>解不通则回退"]
+        FE --> S1 --> S2 --> DISP
+        DISP -->|"pdf"| P
+        DISP -->|"其他"| O
+    end
+
+    subgraph ROW2[" "]
+        direction LR
+        S4["④ 切分<br/>size 500<br/>overlap 100"]
+        S5["⑤ 向量化<br/>bge-small-zh-v1.5<br/>512 维"]
+        S6["⑥ 新文件入库<br/>uploads ／ MinIO<br/>rename ／ put_object"]
+        S7["⑦ 事务写入<br/>documents<br/>+ 替换 chunks"]
+        S8["⑧ 删旧版本<br/>仅覆盖同名文档时<br/>回收旧原文件"]
+        OK(["入库成功<br/>导入即可检索"])
+        S4 --> S5 --> S6 --> S7 --> S8 --> OK
+    end
+
+    ROW1 -->|"产出的文档单元"| ROW2
+
+    classDef step fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e
+    classDef pdf fill:#fde68a,stroke:#d97706,color:#78350f
+    classDef oth fill:#e9d5ff,stroke:#7c3aed,color:#3b0764
+    classDef ok fill:#dcfce7,stroke:#16a34a,color:#14532d
+    class S1,S2,DISP,S4,S5,S6,S7,S8 step
+    class P pdf
+    class O oth
+    class OK ok
+```
+
+图源：[docs/diagrams/知识库入库流程.mmd](docs/diagrams/知识库入库流程.mmd)。
+
+## 提问检索流程
+
+一次提问走完六步：先校验与拼检索 query，两路召回后按 RRF 融合取 top-5；有召回就先发引用编号再流式生成，无召回按固定话术回绝但仍记历史。生成失败或客户端断开则本轮不落库。
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 200, "nodeSpacing": 24, "rankSpacing": 34, "padding": 10, "curve": "basis"}}}%%
+flowchart TB
+
+    subgraph B1["提问与召回 ①~③"]
+        direction LR
+        FE(["前端问答页<br/>POST /api/chat"])
+        V["① 校验<br/>非空 · ≤500 字<br/>续聊先验会话存在"]
+        H["② 会话锁 + 取历史<br/>最近 5 轮 · ≤4000 字<br/>query = 上一轮问题<br/>+ 当前问题"]
+        R["③ 两路召回 + RRF<br/>向量 top-20（HNSW）<br/>关键词 top-20（tsvector）<br/>融合取 top-5<br/>检索失败 → error 事件"]
+        FE --> V --> H --> R
+    end
+
+    subgraph B2["回答与落库 ④~⑥"]
+        direction LR
+        Q{"④ 召回到片段？"}
+        C["发 citations 事件<br/>编号此刻固定"]
+        FB["发固定话术 delta<br/>不调大模型"]
+        G["⑤ 生成回答<br/>流式发 delta<br/>首字节 15 s / 总 60 s"]
+        ERR["error 事件<br/>本轮不落库"]
+        SAVE["⑥ 整轮落库<br/>问题 + 回答<br/>+ 引用快照"]
+        DONE(["done 事件<br/>返回 conversation_id"])
+        Q -->|"有"| C --> G --> SAVE
+        Q -->|"无"| FB --> SAVE
+        G -.->|"超时 · 异常 · Key 缺失<br/>或客户端断开"| ERR
+        SAVE --> DONE
+    end
+
+    B1 -->|"top-5 片段"| B2
+
+    classDef step fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e
+    classDef dec fill:#fde68a,stroke:#d97706,color:#78350f
+    classDef bad fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    classDef ok fill:#dcfce7,stroke:#16a34a,color:#14532d
+    class V,H,R,C,FB,G,SAVE step
+    class Q dec
+    class ERR bad
+    class DONE ok
+```
+
+图源：[docs/diagrams/提问检索流程.mmd](docs/diagrams/提问检索流程.mmd)。
+
 ## 实测数据
 
 | 项 | 结果 | 说明 |

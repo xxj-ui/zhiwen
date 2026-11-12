@@ -1,0 +1,38 @@
+%%{init: {"flowchart": {"wrappingWidth": 200, "nodeSpacing": 24, "rankSpacing": 34, "padding": 10, "curve": "basis"}}}%%
+%% 知问（zhiwen）文档入库流程 · 两段式横向 · ③ 解析按「PDF / 其他」一句话展开 · 依据 rag/loaders.py（2026-11-12）
+flowchart TB
+
+    subgraph ROW1["接收与解析 ①~③"]
+        direction LR
+        FE(["前端知识库页<br/>逐个文件提交"])
+        S1["① 校验<br/>文件名 · 扩展名<br/>大小 · 文件数"]
+        S2["② 中转落盘<br/>data/tmp<br/>超 50 MB 中断"]
+        DISP["③ 解析<br/>按扩展名分发"]
+        P["【PDF】逐页抽文字层<br/>不达标改走 OCR<br/>两路不过则该页跳过<br/>可用页不足整份拒绝"]
+        O["【其他五种】<br/>按扩展名用 python 库解析<br/>编码按 UTF-8 → GB18030<br/>解不通则回退"]
+        FE --> S1 --> S2 --> DISP
+        DISP -->|"pdf"| P
+        DISP -->|"其他"| O
+    end
+
+    subgraph ROW2[" "]
+        direction LR
+        S4["④ 切分<br/>size 500<br/>overlap 100"]
+        S5["⑤ 向量化<br/>bge-small-zh-v1.5<br/>512 维"]
+        S6["⑥ 新文件入库<br/>uploads ／ MinIO<br/>rename ／ put_object"]
+        S7["⑦ 事务写入<br/>documents<br/>+ 替换 chunks"]
+        S8["⑧ 删旧版本<br/>仅覆盖同名文档时<br/>回收旧原文件"]
+        OK(["入库成功<br/>导入即可检索"])
+        S4 --> S5 --> S6 --> S7 --> S8 --> OK
+    end
+
+    ROW1 -->|"产出的文档单元"| ROW2
+
+    classDef step fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e
+    classDef pdf fill:#fde68a,stroke:#d97706,color:#78350f
+    classDef oth fill:#e9d5ff,stroke:#7c3aed,color:#3b0764
+    classDef ok fill:#dcfce7,stroke:#16a34a,color:#14532d
+    class S1,S2,DISP,S4,S5,S6,S7,S8 step
+    class P pdf
+    class O oth
+    class OK ok

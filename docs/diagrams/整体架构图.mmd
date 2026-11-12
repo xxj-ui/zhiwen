@@ -1,0 +1,57 @@
+---
+config:
+  flowchart:
+    wrappingWidth: 380
+    nodeSpacing: 35
+    rankSpacing: 50
+    padding: 10
+    curve: basis
+---
+%% 知问（zhiwen）整体架构图 · 依据 server/ 与 web/ 当前代码（2026-11-12）
+%% 依赖方向：app.py → api/ → services/ → {db/, rag/} → core/（单向，禁止回指）
+flowchart TB
+
+    subgraph FE["① 前端 web/ · React 18 + Vite + TS"]
+        direction LR
+        FE1["页面<br/>问答页 · 知识库页"]
+        FE2["组件<br/>消息 · 文档表 · 上传队列 · 片段抽屉"]
+        FE3["状态<br/>Zustand ×4"]
+        FE4["API 客户端<br/>fetch 封装 + SSE 解析"]
+        FE1 --> FE2 --> FE3 --> FE4
+    end
+
+    subgraph BK["② 后端进程 server/ · FastAPI + uvicorn 单 worker · 127.0.0.1:8000"]
+        direction TB
+        A1["app.py 装配<br/>lifespan 同步预热 · 中间件 · 统一异常"]
+        A2["api/ 契约层 · 9 接口<br/>documents · chat(SSE) · conversations · health"]
+        A3["services/ 编排层<br/>documents · retrieval · chat · history · health · warmup"]
+        A4["rag/ 领域内核 · 纯算法<br/>clean · quality · loaders(+OCR) · splitter · embedder · keyword_search · rrf · llm"]
+        A5["db/ 数据访问 · 唯一 SQL 出口<br/>pool · documents · chunks · conversations"]
+        A6["core/ 横切<br/>config · errors · logging · storage · timeutil"]
+        A1 --> A2 --> A3
+        A3 --> A4
+        A3 --> A5
+        A3 --> A6
+    end
+
+    subgraph INF["③ 基础设施与外部服务"]
+        B1[("PostgreSQL 17 + pgvector<br/>4 张表 · HNSW + GIN<br/>Docker zhiwen-pg :54328")]
+        B2[("原文件存储<br/>MinIO bucket zhiwen<br/>或 data/uploads/")]
+        B3[("嵌入模型<br/>bge-small-zh-v1.5 · 512 维<br/>进程内 CPU ｜ 可选外置 TEI")]
+        B4["DeepSeek API<br/>deepseek-chat<br/>流式 · 超时 15 / 60 s"]
+    end
+
+    FE4 -->|"HTTP · SSE"| A1
+    A5 --> B1
+    A6 --> B2
+    A4 --> B3
+    A4 --> B4
+
+    classDef fe fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e
+    classDef be fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef core fill:#fef3c7,stroke:#d97706,color:#78350f
+    classDef inf fill:#ede9fe,stroke:#7c3aed,color:#3b0764
+    class FE1,FE2,FE3,FE4 fe
+    class A1,A2,A3,A4,A5 be
+    class A6 core
+    class B1,B2,B3,B4 inf

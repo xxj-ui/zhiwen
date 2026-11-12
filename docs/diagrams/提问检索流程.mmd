@@ -1,0 +1,38 @@
+%%{init: {"flowchart": {"wrappingWidth": 200, "nodeSpacing": 24, "rankSpacing": 34, "padding": 10, "curve": "basis"}}}%%
+%% 知问（zhiwen）提问检索流程 · 两段式横向 · 依据 server/api/routes/chat.py、services/chat.py、services/retrieval.py（2026-11-12）
+flowchart TB
+
+    subgraph B1["提问与召回 ①~③"]
+        direction LR
+        FE(["前端问答页<br/>POST /api/chat"])
+        V["① 校验<br/>非空 · ≤500 字<br/>续聊先验会话存在"]
+        H["② 会话锁 + 取历史<br/>最近 5 轮 · ≤4000 字<br/>query = 上一轮问题<br/>+ 当前问题"]
+        R["③ 两路召回 + RRF<br/>向量 top-20（HNSW）<br/>关键词 top-20（tsvector）<br/>融合取 top-5<br/>检索失败 → error 事件"]
+        FE --> V --> H --> R
+    end
+
+    subgraph B2["回答与落库 ④~⑥"]
+        direction LR
+        Q{"④ 召回到片段？"}
+        C["发 citations 事件<br/>编号此刻固定"]
+        FB["发固定话术 delta<br/>不调大模型"]
+        G["⑤ 生成回答<br/>流式发 delta<br/>首字节 15 s / 总 60 s"]
+        ERR["error 事件<br/>本轮不落库"]
+        SAVE["④ 整轮落库<br/>问题 + 回答<br/>+ 引用快照"]
+        DONE(["done 事件<br/>返回 conversation_id"])
+        Q -->|"有"| C --> G --> SAVE
+        Q -->|"无"| FB --> SAVE
+        G -.->|"超时 · 异常 · Key 缺失<br/>或客户端断开"| ERR
+        SAVE --> DONE
+    end
+
+    B1 -->|"top-5 片段"| B2
+
+    classDef step fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e
+    classDef dec fill:#fde68a,stroke:#d97706,color:#78350f
+    classDef bad fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    classDef ok fill:#dcfce7,stroke:#16a34a,color:#14532d
+    class V,H,R,C,FB,G,SAVE step
+    class Q dec
+    class ERR bad
+    class DONE ok
